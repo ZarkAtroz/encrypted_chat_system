@@ -1,0 +1,9 @@
+# sistema_chat_criptografado/Cargo.toml
+
+[workspace]
+members = [
+    "app_um",
+    "app_dois",
+    "shared_crypto",
+]
+resolver = "2" # Usa o resolvedor de features da versão 2, recomendado para novos projetos
