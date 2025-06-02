@@ -2,7 +2,7 @@
 
 use shared_crypto::rsa::{RSAKeys};
 use shared_crypto::base64::{base64_encode, base64_decode};
-use shared_crypto::models::{PublicKeyExchangeMessage, EncryptedChatMessage}; // Deve ter signature_b64
+use shared_crypto::models::{PublicKeyExchangeMessage, EncryptedChatMessage}; 
 use num_bigint::BigUint;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,7 @@ enum KeyExchangeApiResponse {
 
 struct AppState {
     my_keys: Option<RSAKeys>,
-    peer_public_key: Option<(BigUint, BigUint)>, // (e, n)
+    peer_public_key: Option<(BigUint, BigUint)>, 
     peer_webhook_url: Option<String>,
     my_id: String,
     my_webhook_port: u16,
@@ -44,7 +44,7 @@ async fn handle_key_exchange_axum(
     match req_body.e.parse::<BigUint>() {
         Ok(e_val) => match req_body.n.parse::<BigUint>() {
             Ok(n_val) => { 
-                if n_val.bits() < 528 { // Mínimo para OAEP e PKCS#1v1.5 com SHA-256
+                if n_val.bits() < 528 { 
                     let err_msg = format!("Chave pública do peer '{}' é muito pequena ({} bits). Requer >= 528 bits.", req_body.sender_id, n_val.bits());
                     eprintln!("{}", err_msg);
                     return (StatusCode::BAD_REQUEST, Json(KeyExchangeApiResponse::Failure { error: err_msg }));
@@ -90,7 +90,7 @@ async fn handle_chat_message_axum(
     Json(req_body): Json<EncryptedChatMessage>, 
 ) -> impl IntoResponse {
     let _stdout_lock = io::stdout().lock();
-    //println!(""); 
+    // println!(""); // Comentado para reduzir poluição visual no prompt ativo
 
     let app_state_guard = app_state_arc.lock().unwrap(); 
     let current_app_id_for_log = app_state_guard.my_id.clone();
@@ -129,12 +129,12 @@ async fn handle_chat_message_axum(
     let ciphertext_int = BigUint::from_bytes_be(&encrypted_biguint_bytes);
     let signature_int = BigUint::from_bytes_be(&signature_bytes_from_b64);
     
-    eprintln!("\n[DEBUG RECEBENDO em {}] Ciphertext (bytes from B64): {:?}", current_app_id_for_log, encrypted_biguint_bytes);
-    eprintln!("[DEBUG RECEBENDO em {}] Signature (bytes from B64): {:?}", current_app_id_for_log, signature_bytes_from_b64);
+    // eprintln!("\n[DEBUG RECEBENDO em {}] Ciphertext (bytes from B64): {:?}", current_app_id_for_log, encrypted_biguint_bytes); // Comentado
+    // eprintln!("[DEBUG RECEBENDO em {}] Signature (bytes from B64): {:?}", current_app_id_for_log, signature_bytes_from_b64); // Comentado
 
     match my_keys.decrypt_oaep(&ciphertext_int) {
         Ok(decrypted_message_bytes) => {
-            eprintln!("[DEBUG RECEBENDO em {} OAEP] Bytes Descriptografados (de {}): {:?}", current_app_id_for_log, req_body.sender_id, decrypted_message_bytes);
+            // eprintln!("[DEBUG RECEBENDO em {} OAEP] Bytes Descriptografados (de {}): {:?}", current_app_id_for_log, req_body.sender_id, decrypted_message_bytes); // Comentado
 
             match RSAKeys::verify_pkcs1_v1_5_with_external_key(&decrypted_message_bytes, &signature_int, &peer_public_key.0, &peer_public_key.1) {
                 Ok(true) => { 
@@ -226,7 +226,7 @@ async fn start_chat_mode(
         }
 
         let message_bytes = message_text.as_bytes();
-        eprintln!("[DEBUG ENVIANDO por {} OAEP] Bytes Originais ('{}'): {:?}", my_id_clone, message_text, message_bytes);
+        // eprintln!("[DEBUG ENVIANDO por {} OAEP] Bytes Originais ('{}'): {:?}", my_id_clone, message_text, message_bytes); // Comentado
 
         let signature_biguint = match my_keys.sign_pkcs1_v1_5(message_bytes) {
             Ok(sig) => sig,
@@ -237,19 +237,17 @@ async fn start_chat_mode(
         };
         let signature_bytes_for_b64 = signature_biguint.to_bytes_be();
         let signature_b64 = base64_encode(&signature_bytes_for_b64);
-        eprintln!("[PARA POSTMAN] signature_b64: \"{}\"", signature_b64); // CORREÇÃO: Ponto e vírgula adicionado
-        eprintln!("[DEBUG ENVIANDO por {}] Signature (bytes before B64): {:?}", my_id_clone, signature_bytes_for_b64);
+        // eprintln!("[PARA POSTMAN] signature_b64: \"{}\"", signature_b64); // Comentado
+        // eprintln!("[DEBUG ENVIANDO por {}] Signature (bytes before B64): {:?}", my_id_clone, signature_bytes_for_b64); // Comentado
 
 
         match RSAKeys::encrypt_oaep_with_external_key(message_bytes, &peer_public_key.0, &peer_public_key.1) { 
             Ok(encrypted_biguint) => {
                 let encrypted_em_bytes = encrypted_biguint.to_bytes_be();
                 let ciphertext_b64 = base64_encode(&encrypted_em_bytes);
-                eprintln!("[PARA POSTMAN] ciphertext_b64: \"{}\"", ciphertext_b64); 
-                eprintln!("[PARA POSTMAN] sender_id: \"{}\"", my_id_clone); 
-
-
-                eprintln!("[DEBUG ENVIANDO por {}] Ciphertext (bytes before B64): {:?}", my_id_clone, encrypted_em_bytes);
+                // eprintln!("[PARA POSTMAN] ciphertext_b64: \"{}\"", ciphertext_b64); // Comentado
+                // eprintln!("[PARA POSTMAN] sender_id: \"{}\"", my_id_clone); // Comentado
+                // eprintln!("[DEBUG ENVIANDO por {}] Ciphertext (bytes before B64): {:?}", my_id_clone, encrypted_em_bytes); // Comentado
 
 
                 let chat_message_payload = EncryptedChatMessage {
@@ -298,7 +296,7 @@ async fn main() -> io::Result<()> {
     let my_port: u16 = 8080;
     const DEFAULT_KEY_BITS: usize = 1024; 
 
-    println!("[DEBUG] App ID: {}, Porta: {}, Bits Padrão Chave: {}", app_id, my_port, DEFAULT_KEY_BITS);
+    // println!("[DEBUG] App ID: {}, Porta: {}, Bits Padrão Chave: {}", app_id, my_port, DEFAULT_KEY_BITS); // Comentado
 
     let app_state_arc = Arc::new(Mutex::new(AppState {
         my_keys: None,
@@ -307,7 +305,7 @@ async fn main() -> io::Result<()> {
         my_id: app_id.clone(),
         my_webhook_port: my_port,
     }));
-    println!("[DEBUG] AppState inicializado.");
+    // println!("[DEBUG] AppState inicializado."); // Comentado
 
     let axum_app_state = Arc::clone(&app_state_arc);
     let app_axum = Router::new()
@@ -318,7 +316,7 @@ async fn main() -> io::Result<()> {
     let my_address_str = format!("127.0.0.1:{}", my_port);
     let socket_addr: SocketAddr = my_address_str.parse().expect("Formato de endereço inválido");
 
-    println!("[DEBUG THREAD SERVIDOR] Iniciando Servidor Axum para {} em http://{}", app_id, socket_addr);
+    println!("Servidor {} escutando em http://{}", app_id, socket_addr); // Mensagem mais limpa
     
     let server_handle = tokio::spawn(async move {
         axum::serve(
@@ -329,7 +327,7 @@ async fn main() -> io::Result<()> {
         .unwrap();
     });
 
-    println!("[DEBUG] Spawn do servidor Axum solicitado e thread principal continua.");
+    // println!("[DEBUG] Spawn do servidor Axum solicitado e thread principal continua."); // Comentado
 
     let http_client = Client::new();
 
@@ -505,7 +503,7 @@ async fn main() -> io::Result<()> {
                 }
                 
                 let message_bytes = message_text.as_bytes();
-                eprintln!("[DEBUG ENVIANDO por {} OAEP] Bytes Originais (Única) ('{}'): {:?}", my_id_clone, message_text, message_bytes);
+                // eprintln!("[DEBUG ENVIANDO por {} OAEP] Bytes Originais (Única) ('{}'): {:?}", my_id_clone, message_text, message_bytes); // Comentado
 
                 let signature_biguint = match my_keys.sign_pkcs1_v1_5(message_bytes) {
                     Ok(sig) => sig,
@@ -516,16 +514,16 @@ async fn main() -> io::Result<()> {
                 };
                 let signature_bytes_for_b64 = signature_biguint.to_bytes_be();
                 let signature_b64 = base64_encode(&signature_bytes_for_b64);
-                eprintln!("[PARA POSTMAN] signature_b64: \"{}\"", signature_b64); // CORREÇÃO: Ponto e vírgula adicionado
-                eprintln!("[DEBUG ENVIANDO por {}] Signature (bytes before B64): {:?}", my_id_clone, signature_bytes_for_b64);
+                // eprintln!("[PARA POSTMAN] signature_b64: \"{}\"", signature_b64); // Comentado
+                // eprintln!("[DEBUG ENVIANDO por {}] Signature (bytes before B64): {:?}", my_id_clone, signature_bytes_for_b64); // Comentado
 
                 match RSAKeys::encrypt_oaep_with_external_key(message_bytes, &peer_public_key_clone.0, &peer_public_key_clone.1) { 
                     Ok(encrypted_biguint) => {
                         let encrypted_em_bytes = encrypted_biguint.to_bytes_be();
                         let ciphertext_b64 = base64_encode(&encrypted_em_bytes);
-                        eprintln!("[PARA POSTMAN] ciphertext_b64: \"{}\"", ciphertext_b64); 
-                        eprintln!("[PARA POSTMAN] sender_id: \"{}\"", my_id_clone); 
-                        eprintln!("[DEBUG ENVIANDO por {}] Ciphertext (bytes before B64): {:?}", my_id_clone, encrypted_em_bytes);
+                        // eprintln!("[PARA POSTMAN] ciphertext_b64: \"{}\"", ciphertext_b64); // Comentado
+                        // eprintln!("[PARA POSTMAN] sender_id: \"{}\"", my_id_clone); // Comentado
+                        // eprintln!("[DEBUG ENVIANDO por {}] Ciphertext (bytes before B64): {:?}", my_id_clone, encrypted_em_bytes); // Comentado
 
                         let chat_message = EncryptedChatMessage {
                             ciphertext_b64,
