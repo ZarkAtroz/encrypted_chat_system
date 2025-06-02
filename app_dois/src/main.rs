@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use actix_web::{web, App, HttpServer, Responder, HttpResponse};
 use reqwest::Client;
-use inquire::{Select, Text, Confirm};
+use inquire::{Select, Text};
 use clearscreen::clear;
 
 struct AppState {
@@ -23,7 +23,7 @@ async fn handle_key_exchange(
     req_body: web::Json<PublicKeyExchangeMessage>,
     data: web::Data<Arc<Mutex<AppState>>>,
 ) -> impl Responder {
-    println!("[DEBUG] Handler handle_key_exchange chamado.");
+    // println!("[DEBUG] Handler handle_key_exchange chamado.");
     let mut app_state = data.lock().unwrap();
     
     match req_body.e.parse::<BigUint>() {
@@ -43,17 +43,17 @@ async fn handle_key_exchange(
                     };
                     HttpResponse::Ok().json(my_public_key_msg)
                 } else {
-                    eprintln!("[DEBUG] Minhas chaves não geradas ao responder key exchange.");
+                    // eprintln!("[DEBUG] Minhas chaves não geradas ao responder key exchange.");
                     HttpResponse::InternalServerError().body("Minhas chaves RSA não foram geradas ainda.")
                 }
             }
             Err(e) => {
-                eprintln!("[DEBUG] Erro parse N em key exchange: {}", e);
+                eprintln!("Erro ao processar 'n' da chave pública recebida: {}", e);
                 HttpResponse::BadRequest().body("Formato de 'n' da chave pública inválido.")
             },
         },
         Err(e) => {
-            eprintln!("[DEBUG] Erro parse E em key exchange: {}", e);
+            eprintln!("Erro ao processar 'e' da chave pública recebida: {}", e);
             HttpResponse::BadRequest().body("Formato de 'e' da chave pública inválido.")
         },
     }
@@ -78,28 +78,28 @@ async fn handle_chat_message(
                         match String::from_utf8(decrypted_bytes) {
                             Ok(decrypted_message) => {
                                 println!("\r<-- [{}] {}", req_body.sender_id, decrypted_message);
-                                HttpResponse::Ok().body("Mensagem recebida e decifrada com sucesso.")
+                                HttpResponse::Ok().body("Mensagem recebida.")
                             }
                             Err(e) => {
-                                eprintln!("[DEBUG CHAT RECEBIDO] Erro ao converter bytes decifrados para UTF-8: {}. Bytes: {:?}", e, decrypted_num.to_bytes_be());
-                                HttpResponse::InternalServerError().body("Erro ao decifrar mensagem (não é UTF-8 válido).")
+                                eprintln!("\r[ERRO CHAT RECEBIDO] Falha ao converter para UTF-8: {}", e);
+                                HttpResponse::InternalServerError().body("Mensagem recebida corrompida (UTF-8).")
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("[DEBUG CHAT RECEBIDO] Erro ao descriptografar: {}. Ciphertext (num): {}", e, cipher_num);
-                        HttpResponse::InternalServerError().body(format!("Erro ao descriptografar: {}", e))
+                        eprintln!("\r[ERRO CHAT RECEBIDO] Falha ao descriptografar: {}", e);
+                        HttpResponse::InternalServerError().body(format!("Falha ao descriptografar: {}", e))
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[DEBUG CHAT RECEBIDO] Erro de decodificação Base64: {}", e);
-                HttpResponse::BadRequest().body(format!("Erro de decodificação Base64: {}", e))
+                eprintln!("\r[ERRO CHAT RECEBIDO] Falha na decodificação Base64: {}", e);
+                HttpResponse::BadRequest().body(format!("Falha na decodificação Base64: {}", e))
             }
         }
     } else {
-        eprintln!("[DEBUG CHAT RECEBIDO] Tentativa de descriptografar sem minhas chaves RSA.");
-        HttpResponse::InternalServerError().body("Minhas chaves RSA não estão disponíveis para descriptografar.")
+        eprintln!("\r[ERRO CHAT RECEBIDO] Chaves não disponíveis para descriptografar.");
+        HttpResponse::InternalServerError().body("Chaves não disponíveis.")
     }
 }
 
@@ -107,20 +107,19 @@ async fn start_chat_mode(
     app_state_arc: Arc<Mutex<AppState>>,
     http_client: &Client,
 ) -> io::Result<()> {
-    clear().unwrap_or_else(|e| eprintln!("Erro ao limpar tela: {}", e));
+    clear().unwrap_or_else(|e| eprintln!("[Aviso] Erro ao limpar tela: {}", e));
     println!("--- Modo Chat ---");
-    println!("Você está conectado. Digite suas mensagens abaixo.");
-    println!("Digite '/sair' ou '/exit' para voltar ao menu principal.");
-    println!("----------------------------------------------------");
+    println!("Conectado! Digite suas mensagens ou '/sair' para retornar ao menu.");
+    println!("-----------------------------------------------------------------");
 
     loop {
-        let (can_chat, my_id_clone, peer_public_key_clone, peer_url_clone) = {
+        let (can_chat, my_id_clone, peer_public_key_opt, peer_url_opt) = {
             let state = app_state_arc.lock().unwrap();
             if state.my_keys.is_none() {
-                println!("❌ Erro: Suas chaves RSA não foram geradas. Por favor, gere-as no menu principal.");
+                println!("❌ Suas chaves RSA não foram geradas. Volte ao menu e use a Opção 1.");
                 (false, String::new(), None, None)
             } else if state.peer_public_key.is_none() || state.peer_webhook_url.is_none() {
-                println!("❌ Erro: A chave pública do peer ou a URL do webhook não está definida. Realize a troca de chaves no menu principal.");
+                println!("❌ Chave do peer ou URL não definida. Volte ao menu e use a Opção 2 para trocar chaves.");
                 (false, String::new(), None, None)
             } else {
                 (
@@ -133,21 +132,21 @@ async fn start_chat_mode(
         };
 
         if !can_chat {
-            println!("\nPressione Enter para voltar ao menu principal...");
+            println!("\nPressione Enter para voltar ao menu...");
             io::stdout().flush()?;
             io::stdin().read_line(&mut String::new())?;
-            break;
+            break; 
         }
         
-        let peer_public_key = peer_public_key_clone.unwrap();
-        let peer_url = peer_url_clone.unwrap();
+        let peer_public_key = peer_public_key_opt.unwrap();
+        let peer_url = peer_url_opt.unwrap();
 
-        print!("Você: ");
+        print!("Você: "); 
         io::stdout().flush()?;
 
         let mut message_text = String::new();
         if io::stdin().read_line(&mut message_text)? == 0 {
-            println!("EOF detectado. Saindo do modo chat...");
+            println!("\nEOF detectado. Saindo do modo chat...");
             break;
         }
         let message_text = message_text.trim();
@@ -176,12 +175,10 @@ async fn start_chat_mode(
 
                 let client_clone = http_client.clone();
                 let url_clone = peer_url.clone();
-                let payload_clone = chat_message_payload.clone();
-
+                
                 tokio::spawn(async move {
-                    println!("[CHAT->] Enviando para {}...", url_clone);
                     match client_clone.post(&format!("{}/chat", url_clone))
-                                .json(&payload_clone)
+                                .json(&chat_message_payload)
                                 .send()
                                 .await 
                     {
@@ -189,35 +186,33 @@ async fn start_chat_mode(
                             if !response.status().is_success() {
                                 let status = response.status();
                                 match response.text().await {
-                                    Ok(text) => eprintln!("\r[ERRO ENVIO]: Status {}, Resposta: {}", status, text),
-                                    Err(_) => eprintln!("\r[ERRO ENVIO]: Status {} e erro ao ler corpo.", status),
+                                    Ok(text) => eprintln!("\r[ERRO ENVIO CHAT]: Status {}, Resposta: {}", status, text),
+                                    Err(_) => eprintln!("\r[ERRO ENVIO CHAT]: Status {} e erro ao ler corpo da resposta.", status),
                                 }
                             }
                         }
-                        Err(e) => eprintln!("\r[ERRO ENVIO]: Rede - {}", e),
+                        Err(e) => eprintln!("\r[ERRO ENVIO CHAT]: Rede - {}", e),
                     }
                 });
             }
             Err(e) => {
-                eprintln!("\r[ERRO CRIPTO]: {}", e);
-                print!("Você: ");
-                io::stdout().flush()?;
+                eprintln!("\r[ERRO CRIPTOGRAFIA]: {}", e);
             }
         }
     }
-    clear().unwrap_or_else(|e| eprintln!("Erro ao limpar tela: {}", e));
+    clear().unwrap_or_else(|e| eprintln!("[Aviso] Erro ao limpar tela: {}", e));
     Ok(())
 }
 
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    clear().unwrap_or_else(|e| eprintln!("Erro ao limpar tela: {}",e));
+    clear().unwrap_or_else(|e| eprintln!("[Aviso] Erro ao limpar tela: {}",e));
 
-    // ***** ALTERAÇÕES PRINCIPAIS PARA APP_DOIS *****
-    let app_id = "App_Dois".to_string();
-    let my_port: u16 = 8081;
-    // ***** FIM DAS ALTERAÇÕES PRINCIPAIS *****
+    // ***** ALTERAÇÕES PARA APP_DOIS *****
+    let app_id = "App_Dois".to_string(); 
+    let my_port: u16 = 8081;         
+    // ***** FIM DAS ALTERAÇÕES *****
 
     println!("[DEBUG] App ID: {}, Porta: {}", app_id, my_port);
 
@@ -236,7 +231,9 @@ async fn main() -> io::Result<()> {
     println!("[DEBUG] Servidor HTTP irá configurar rotas ao ser construído por cada worker.");
 
     let server_handle = tokio::spawn(async move {
-        println!("[DEBUG THREAD SERVIDOR] Iniciando HttpServer para {} em http://{}", app_id, my_address); 
+        // Re-clonar app_id para a thread do servidor, pois ela é movida.
+        let app_id_server = app_id.clone(); 
+        println!("[DEBUG THREAD SERVIDOR] Iniciando HttpServer para {} em http://{}", app_id_server, my_address); 
         HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(Arc::clone(&server_state_ref)))
@@ -248,14 +245,14 @@ async fn main() -> io::Result<()> {
         .run()
         .await
         .expect("[PANIC] Falha ao executar o servidor HTTP (run.await falhou)");
-        println!("[DEBUG THREAD SERVIDOR] Servidor HTTP para {} foi encerrado.", app_id);
+        println!("[DEBUG THREAD SERVIDOR] Servidor HTTP para {} foi encerrado.", app_id_server);
     });
     println!("[DEBUG] Spawn do servidor HTTP solicitado e thread principal continua.");
 
     let http_client = Client::new();
 
     loop {
-        clear().unwrap_or_else(|e| eprintln!("Erro ao limpar tela: {}",e));
+        clear().unwrap_or_else(|e| eprintln!("[Aviso] Erro ao limpar tela: {}",e));
         
         let current_app_id;
         let current_my_port;
@@ -314,7 +311,7 @@ async fn main() -> io::Result<()> {
                             format!("http://localhost:{}", state_guard.my_webhook_port),
                             state_guard.my_id.clone(),
                             // ***** ALTERAÇÃO PARA APP_DOIS *****
-                            (if state_guard.my_webhook_port == 8081 {"8080"} else {"8081"}).to_string() 
+                            (if state_guard.my_webhook_port == 8081 {"8080"} else {"8081"}).to_string()
                         )
                     }
                 };
@@ -339,14 +336,14 @@ async fn main() -> io::Result<()> {
                     sender_id: my_id_clone_for_exchange,
                 };
 
-                println!("[DEBUG] Enviando chave para: {}/key-exchange", peer_url);
+                // println!("[DEBUG] Enviando chave para: {}/key-exchange", peer_url);
                 match http_client.post(&format!("{}/key-exchange", peer_url))
                             .json(&my_public_key_msg)
                             .send()
                             .await
                 {
                     Ok(response) => {
-                        println!("[DEBUG] Resposta da troca de chaves status: {}", response.status());
+                        // println!("[DEBUG] Resposta da troca de chaves status: {}", response.status());
                         if response.status().is_success() {
                             match response.json::<PublicKeyExchangeMessage>().await {
                                 Ok(peer_response_key_msg) => {
@@ -356,7 +353,7 @@ async fn main() -> io::Result<()> {
                                                 let mut state_after_network = app_state.lock().unwrap();
                                                 state_after_network.peer_public_key = Some((e_val, n_val));
                                                 state_after_network.peer_webhook_url = Some(peer_response_key_msg.webhook_url.clone());
-                                                println!("✅ Chave pública do peer ({}) recebida e URL do webhook definida para: {}", peer_response_key_msg.sender_id, peer_response_key_msg.webhook_url);
+                                                println!("✅ Chave pública do peer ({}) recebida e URL definida para: {}", peer_response_key_msg.sender_id, peer_response_key_msg.webhook_url);
                                             }
                                             Err(e) => eprintln!("Erro ao decodificar 'n' da chave pública do peer: {}", e),
                                         },
@@ -411,26 +408,26 @@ async fn main() -> io::Result<()> {
                 let message_bytes = message_text.as_bytes();
                 let message_biguint = BigUint::from_bytes_be(message_bytes);
 
-                println!("[DEBUG] Criptografando mensagem para {}: BigUint(len {} bytes) = {}...", my_id_clone, message_bytes.len(), message_text);
+                // println!("[DEBUG] Criptografando mensagem para {}: ...", my_id_clone);
                 match RSAKeys::encrypt_with_external_key(&message_biguint, &peer_public_key_clone.0, &peer_public_key_clone.1) {
                     Ok(encrypted_biguint) => {
                         let encrypted_bytes = encrypted_biguint.to_bytes_be();
                         let ciphertext_b64 = base64_encode(&encrypted_bytes);
-                        println!("[DEBUG] Ciphertext B64: {}", ciphertext_b64);
+                        // println!("[DEBUG] Ciphertext B64: {}", ciphertext_b64);
 
                         let chat_message = EncryptedChatMessage {
                             ciphertext_b64,
                             sender_id: my_id_clone,
                         };
 
-                        println!("[DEBUG] Enviando mensagem criptografada para {}/chat...", peer_url_clone);
+                        // println!("[DEBUG] Enviando mensagem criptografada para {}/chat...", peer_url_clone);
                         match http_client.post(&format!("{}/chat", peer_url_clone))
                                     .json(&chat_message)
                                     .send()
                                     .await
                         {
                             Ok(response) => {
-                                println!("[DEBUG] Resposta do envio de chat status: {}", response.status());
+                                // println!("[DEBUG] Resposta do envio de chat status: {}", response.status());
                                 if response.status().is_success() {
                                     println!("✅ Mensagem enviada com sucesso!");
                                 } else {
@@ -480,7 +477,7 @@ async fn main() -> io::Result<()> {
             "6. Sair" => {
                 println!("Saindo...");
                 if !server_handle.is_finished() {
-                    println!("[DEBUG] A thread do servidor ainda pode estar rodando. Tentando abortar...");
+                    // println!("[DEBUG] A thread do servidor ainda pode estar rodando. Tentando abortar...");
                     server_handle.abort();
                 }
                 break;
