@@ -14,6 +14,7 @@ pub struct PublicKeyExchangeMessage {
 /// Mensagem de chat criptografada.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EncryptedChatMessage {
-    pub ciphertext_b64: String, // Texto cifrado (BigUint -> bytes -> Base64 string)
+    pub ciphertext_b64: String, // Texto cifrado (RSAES-OAEP(mensagem) -> BigUint -> bytes -> Base64 string)
     pub sender_id: String,      // Identificador de quem enviou a mensagem
+    pub signature_b64: String,  // Assinatura da *mensagem original em bytes* (RSASSA-PKCS1-v1_5(SHA256(mensagem_bytes)) -> BigUint -> bytes -> Base64 string)
 }

@@ -43,17 +43,15 @@ async fn handle_key_exchange_axum(
     
     match req_body.e.parse::<BigUint>() {
         Ok(e_val) => match req_body.n.parse::<BigUint>() {
-            Ok(n_val) => { // n_val é movido aqui se não clonado
+            Ok(n_val) => { 
                 if n_val.bits() < 528 {
-                    let err_msg = format!("Chave pública do peer '{}' é muito pequena ({} bits) para OAEP com SHA-256. Requer >= 528 bits.", req_body.sender_id, n_val.bits());
+                    let err_msg = format!("Chave pública do peer '{}' é muito pequena ({} bits). Requer >= 528 bits.", req_body.sender_id, n_val.bits());
                     eprintln!("{}", err_msg);
                     return (StatusCode::BAD_REQUEST, Json(KeyExchangeApiResponse::Failure { error: err_msg }));
                 }
 
-                // CORREÇÃO: Clonar n_val ao armazenar
                 app_state.peer_public_key = Some((e_val, n_val.clone()));
                 app_state.peer_webhook_url = Some(req_body.webhook_url.clone());
-                // Agora n_val ainda está disponível para o println!
                 println!("\n✅ Chave pública de '{}' ({} bits) recebida e URL definida para: {}", req_body.sender_id, n_val.bits(), req_body.webhook_url);
                 println!("    Agora você pode enviar mensagens para ele.");
                 
@@ -89,50 +87,82 @@ async fn handle_key_exchange_axum(
 
 async fn handle_chat_message_axum(
     State(app_state_arc): State<Arc<Mutex<AppState>>>,
-    Json(req_body): Json<EncryptedChatMessage>,
+    Json(req_body): Json<EncryptedChatMessage>, 
 ) -> impl IntoResponse {
     let _stdout_lock = io::stdout().lock();
-    println!(""); 
+    //println!(""); 
 
-    let app_state = app_state_arc.lock().unwrap();
-    let current_app_id_for_log = app_state.my_id.clone();
+    let app_state_guard = app_state_arc.lock().unwrap(); 
+    let current_app_id_for_log = app_state_guard.my_id.clone();
 
-    if let Some(my_keys) = &app_state.my_keys {
-        match base64_decode(&req_body.ciphertext_b64) {
-            Ok(encrypted_biguint_bytes) => {
-                let ciphertext_int = BigUint::from_bytes_be(&encrypted_biguint_bytes);
+    let my_keys = match &app_state_guard.my_keys {
+        Some(keys) => keys,
+        None => {
+            eprintln!("\r[ERRO CHAT RECEBIDO em {}] Minhas chaves não disponíveis para descriptografar (de {}).", current_app_id_for_log, req_body.sender_id);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Chaves do destinatário não disponíveis.".to_string());
+        }
+    };
 
-                eprintln!("[DEBUG RECEBENDO em {}] Ciphertext (BigUint as bytes from Base64): {:?}", current_app_id_for_log, encrypted_biguint_bytes);
+    let peer_public_key = match &app_state_guard.peer_public_key {
+        Some(key) => key,
+        None => {
+            eprintln!("\r[ERRO CHAT RECEBIDO em {}] Chave pública do peer {} não conhecida para verificar assinatura.", current_app_id_for_log, req_body.sender_id);
+            return (StatusCode::BAD_REQUEST, "Chave do remetente desconhecida para verificação.".to_string());
+        }
+    };
 
-                match my_keys.decrypt_oaep(&ciphertext_int) { 
-                    Ok(decrypted_message_bytes) => {
-                        eprintln!("[DEBUG RECEBENDO em {} OAEP] Bytes Descriptografados (de {}): {:?}", current_app_id_for_log, req_body.sender_id, decrypted_message_bytes);
-                        
-                        match String::from_utf8(decrypted_message_bytes) {
-                            Ok(decrypted_message) => {
-                                println!("\r<-- [{}] {}", req_body.sender_id, decrypted_message);
-                                (StatusCode::OK, "Mensagem recebida.".to_string())
-                            }
-                            Err(e) => {
-                                eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha ao converter para UTF-8 após OAEP (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
-                                (StatusCode::INTERNAL_SERVER_ERROR, "Mensagem recebida corrompida (UTF-8).".to_string())
-                            }
+    let encrypted_biguint_bytes = match base64_decode(&req_body.ciphertext_b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha na decodificação Base64 do ciphertext (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
+            return (StatusCode::BAD_REQUEST, format!("Falha na decodificação Base64 do ciphertext: {}", e));
+        }
+    };
+    let signature_bytes_from_b64 = match base64_decode(&req_body.signature_b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha na decodificação Base64 da assinatura (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
+            return (StatusCode::BAD_REQUEST, format!("Falha na decodificação Base64 da assinatura: {}", e));
+        }
+    };
+
+    let ciphertext_int = BigUint::from_bytes_be(&encrypted_biguint_bytes);
+    let signature_int = BigUint::from_bytes_be(&signature_bytes_from_b64);
+    
+    eprintln!("\n[DEBUG RECEBENDO em {}] Ciphertext (bytes from B64): {:?}", current_app_id_for_log, encrypted_biguint_bytes);
+    eprintln!("[DEBUG RECEBENDO em {}] Signature (bytes from B64): {:?}", current_app_id_for_log, signature_bytes_from_b64);
+
+    match my_keys.decrypt_oaep(&ciphertext_int) {
+        Ok(decrypted_message_bytes) => {
+            eprintln!("[DEBUG RECEBENDO em {} OAEP] Bytes Descriptografados (de {}): {:?}", current_app_id_for_log, req_body.sender_id, decrypted_message_bytes);
+
+            match RSAKeys::verify_pkcs1_v1_5_with_external_key(&decrypted_message_bytes, &signature_int, &peer_public_key.0, &peer_public_key.1) {
+                Ok(true) => { 
+                    match String::from_utf8(decrypted_message_bytes) {
+                        Ok(decrypted_message) => {
+                            println!("\r<-- [{}] {}", req_body.sender_id, decrypted_message);
+                            (StatusCode::OK, "Mensagem recebida e verificada.".to_string())
+                        }
+                        Err(e) => {
+                            eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha ao converter para UTF-8 após OAEP e verificação (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, "Mensagem verificada corrompida (UTF-8).".to_string())
                         }
                     }
-                    Err(e) => {
-                        eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha ao descriptografar com OAEP (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
-                        (StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao descriptografar (OAEP): {}", e))
-                    }
+                }
+                Ok(false) => { 
+                    eprintln!("\r[ERRO CHAT RECEBIDO em {}] ASSINATURA INVÁLIDA da mensagem de {}!", current_app_id_for_log, req_body.sender_id);
+                    (StatusCode::BAD_REQUEST, "Assinatura da mensagem inválida.".to_string())
+                }
+                Err(e) => { 
+                    eprintln!("\r[ERRO CHAT RECEBIDO em {}] Erro ao verificar assinatura de {}: {}", current_app_id_for_log, req_body.sender_id, e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Erro no processo de verificação da assinatura: {}", e))
                 }
             }
-            Err(e) => {
-                eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha na decodificação Base64 (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
-                (StatusCode::BAD_REQUEST, format!("Falha na decodificação Base64: {}", e))
-            }
         }
-    } else {
-        eprintln!("\r[ERRO CHAT RECEBIDO em {}] Chaves não disponíveis para descriptografar (de {}).", current_app_id_for_log, req_body.sender_id);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Chaves não disponíveis.".to_string())
+        Err(e) => {
+            eprintln!("\r[ERRO CHAT RECEBIDO em {}] Falha ao descriptografar com OAEP (de {}): {}", current_app_id_for_log, req_body.sender_id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao descriptografar (OAEP): {}", e))
+        }
     }
 }
 
@@ -146,31 +176,33 @@ async fn start_chat_mode(
     println!("-----------------------------------------------------------------");
 
     loop {
-        let (can_chat, my_id_clone, peer_public_key_opt, peer_url_opt) = {
+        let (can_chat, my_id_clone, my_keys_clone_opt, peer_public_key_opt, peer_url_opt) = { 
             let state = app_state_arc.lock().unwrap();
             if state.my_keys.is_none() {
                 println!("❌ Suas chaves RSA não foram geradas. Volte ao menu e use a Opção 1.");
-                (false, String::new(), None, None)
+                (false, String::new(), None, None, None)
             } else if state.peer_public_key.is_none() || state.peer_webhook_url.is_none() {
                 println!("❌ Chave do peer ou URL não definida. Volte ao menu e use a Opção 2 para trocar chaves.");
-                (false, String::new(), None, None)
+                (false, String::new(), None, None, None)
             } else {
                 (
                     true,
                     state.my_id.clone(),
+                    state.my_keys.clone(), 
                     state.peer_public_key.clone(),
                     state.peer_webhook_url.clone(),
                 )
             }
         };
 
-        if !can_chat {
+        if !can_chat || my_keys_clone_opt.is_none() { 
             println!("\nPressione Enter para voltar ao menu...");
             io::stdout().flush()?;
             io::stdin().read_line(&mut String::new())?;
             break; 
         }
         
+        let my_keys = my_keys_clone_opt.unwrap(); 
         let peer_public_key = peer_public_key_opt.unwrap(); 
         let peer_url = peer_url_opt.unwrap();
 
@@ -196,14 +228,28 @@ async fn start_chat_mode(
         let message_bytes = message_text.as_bytes();
         eprintln!("[DEBUG ENVIANDO por {} OAEP] Bytes Originais ('{}'): {:?}", my_id_clone, message_text, message_bytes);
 
+        let signature_biguint = match my_keys.sign_pkcs1_v1_5(message_bytes) {
+            Ok(sig) => sig,
+            Err(e) => {
+                eprintln!("\r[ERRO AO ASSINAR MENSAGEM]: {}", e);
+                continue;
+            }
+        };
+        let signature_bytes_for_b64 = signature_biguint.to_bytes_be();
+        let signature_b64 = base64_encode(&signature_bytes_for_b64);
+        eprintln!("[PARA POSTMAN] signature_b64: \"{}\"", signature_b64);
+
         match RSAKeys::encrypt_oaep_with_external_key(message_bytes, &peer_public_key.0, &peer_public_key.1) { 
             Ok(encrypted_biguint) => {
                 let encrypted_em_bytes = encrypted_biguint.to_bytes_be();
                 let ciphertext_b64 = base64_encode(&encrypted_em_bytes);
+                eprintln!("[PARA POSTMAN] ciphertext_b64: \"{}\"", ciphertext_b64);
+                eprintln!("[PARA POSTMAN] sender_id: \"{}\"", my_id_clone);
 
                 let chat_message_payload = EncryptedChatMessage {
                     ciphertext_b64,
                     sender_id: my_id_clone.clone(),
+                    signature_b64, 
                 };
 
                 let client_clone = http_client.clone();
@@ -320,7 +366,7 @@ async fn main() -> io::Result<()> {
                 match bits_str.trim().parse::<usize>() {
                     Ok(bits) => {
                         if bits < 528 {
-                             eprintln!("❌ Tamanho de bits muito pequeno para OAEP com SHA-256 (mínimo 528). Use {} ou mais.", DEFAULT_KEY_BITS);
+                             eprintln!("❌ Tamanho de bits muito pequeno para OAEP/Assinatura com SHA-256 (mínimo 528). Use {} ou mais.", DEFAULT_KEY_BITS);
                             continue;
                         }
                         println!("Gerando chaves de {} bits...", bits);
@@ -385,15 +431,13 @@ async fn main() -> io::Result<()> {
                                         KeyExchangeApiResponse::Success(peer_key_msg) => {
                                             match peer_key_msg.e.parse::<BigUint>() {
                                                 Ok(e_val) => match peer_key_msg.n.parse::<BigUint>() {
-                                                    Ok(n_val) => { // n_val é movido aqui se não clonado
+                                                    Ok(n_val) => { 
                                                         if n_val.bits() < 528 {
-                                                            eprintln!("❌ Chave do peer '{}' é muito pequena ({} bits) para OAEP. Não armazenada.", peer_key_msg.sender_id, n_val.bits());
+                                                            eprintln!("❌ Chave do peer '{}' é muito pequena ({} bits). Não armazenada.", peer_key_msg.sender_id, n_val.bits());
                                                         } else {
                                                             let mut state_after_network = app_state_arc.lock().unwrap();
-                                                            // CORREÇÃO: Clonar n_val ao armazenar
                                                             state_after_network.peer_public_key = Some((e_val, n_val.clone()));
                                                             state_after_network.peer_webhook_url = Some(peer_key_msg.webhook_url.clone());
-                                                            // Agora n_val ainda está disponível para o println!
                                                             println!("✅ Chave pública do peer ({}, {} bits) recebida e URL definida para: {}", peer_key_msg.sender_id, n_val.bits(), peer_key_msg.webhook_url);
                                                         }
                                                     }
@@ -421,16 +465,17 @@ async fn main() -> io::Result<()> {
                 }
             }
             "3. Enviar Mensagem Criptografada (Única)" => {
-                 let (peer_public_key_clone_opt, peer_url_clone_opt, my_id_clone, keys_present) = {
+                 let (my_keys_opt, peer_public_key_clone_opt, peer_url_clone_opt, my_id_clone, keys_present) = { 
                     let state_guard = app_state_arc.lock().unwrap();
                     if state_guard.peer_public_key.is_none() || state_guard.peer_webhook_url.is_none() {
                         println!("Troque chaves com outro peer primeiro (Opção 2).");
-                        (None, None, "".to_string(), false)
+                        (None, None, None, "".to_string(), false)
                     } else if state_guard.my_keys.is_none() {
                          println!("Gere suas chaves RSA primeiro (Opção 1).");
-                        (None, None, "".to_string(), false)
+                        (None, None, None, "".to_string(), false)
                     } else {
                         (
+                            state_guard.my_keys.clone(), 
                             Some(state_guard.peer_public_key.as_ref().unwrap().clone()),
                             Some(state_guard.peer_webhook_url.as_ref().unwrap().clone()),
                             state_guard.my_id.clone(),
@@ -439,10 +484,11 @@ async fn main() -> io::Result<()> {
                     }
                 };
 
-                if !keys_present {
+                if !keys_present || my_keys_opt.is_none() { 
                     continue;
                 }
                 
+                let my_keys = my_keys_opt.unwrap();
                 let peer_public_key_clone = peer_public_key_clone_opt.unwrap(); 
                 let peer_url_clone = peer_url_clone_opt.unwrap();
 
@@ -455,14 +501,27 @@ async fn main() -> io::Result<()> {
                 let message_bytes = message_text.as_bytes();
                 eprintln!("[DEBUG ENVIANDO por {} OAEP] Bytes Originais (Única) ('{}'): {:?}", my_id_clone, message_text, message_bytes);
 
+                let signature_biguint = match my_keys.sign_pkcs1_v1_5(message_bytes) {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        eprintln!("❌ Erro ao assinar mensagem: {}", e);
+                        continue;
+                    }
+                };
+                let signature_bytes_for_b64 = signature_biguint.to_bytes_be();
+                let signature_b64 = base64_encode(&signature_bytes_for_b64);
+                eprintln!("[DEBUG ENVIANDO por {}] Signature (bytes before B64): {:?}", my_id_clone, signature_bytes_for_b64);
+
                 match RSAKeys::encrypt_oaep_with_external_key(message_bytes, &peer_public_key_clone.0, &peer_public_key_clone.1) { 
                     Ok(encrypted_biguint) => {
                         let encrypted_em_bytes = encrypted_biguint.to_bytes_be();
                         let ciphertext_b64 = base64_encode(&encrypted_em_bytes);
+                        eprintln!("[DEBUG ENVIANDO por {}] Ciphertext (bytes before B64): {:?}", my_id_clone, encrypted_em_bytes);
 
                         let chat_message = EncryptedChatMessage {
                             ciphertext_b64,
                             sender_id: my_id_clone,
+                            signature_b64, 
                         };
 
                         match http_client.post(&format!("{}/chat", peer_url_clone))
