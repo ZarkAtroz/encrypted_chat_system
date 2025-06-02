@@ -6,10 +6,26 @@ use shared_crypto::models::{PublicKeyExchangeMessage, EncryptedChatMessage};
 use num_bigint::BigUint;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use actix_web::{web, App, HttpServer, Responder, HttpResponse};
+use axum::{
+    routing::post,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+    Router,
+};
 use reqwest::Client;
 use inquire::{Select, Text};
 use clearscreen::clear;
+use tokio;
+use std::net::SocketAddr;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(untagged)]
+enum KeyExchangeApiResponse {
+    Success(PublicKeyExchangeMessage),
+    Failure { error: String },
+}
 
 struct AppState {
     my_keys: Option<RSAKeys>,
@@ -19,12 +35,11 @@ struct AppState {
     my_webhook_port: u16,
 }
 
-async fn handle_key_exchange(
-    req_body: web::Json<PublicKeyExchangeMessage>,
-    data: web::Data<Arc<Mutex<AppState>>>,
-) -> impl Responder {
-    // println!("[DEBUG] Handler handle_key_exchange chamado.");
-    let mut app_state = data.lock().unwrap();
+async fn handle_key_exchange_axum(
+    State(app_state_arc): State<Arc<Mutex<AppState>>>,
+    Json(req_body): Json<PublicKeyExchangeMessage>,
+) -> impl IntoResponse {
+    let mut app_state = app_state_arc.lock().unwrap();
     
     match req_body.e.parse::<BigUint>() {
         Ok(e_val) => match req_body.n.parse::<BigUint>() {
@@ -41,32 +56,37 @@ async fn handle_key_exchange(
                         webhook_url: format!("http://localhost:{}", app_state.my_webhook_port),
                         sender_id: app_state.my_id.clone(),
                     };
-                    HttpResponse::Ok().json(my_public_key_msg)
+                    (StatusCode::OK, Json(KeyExchangeApiResponse::Success(my_public_key_msg)))
                 } else {
-                    // eprintln!("[DEBUG] Minhas chaves não geradas ao responder key exchange.");
-                    HttpResponse::InternalServerError().body("Minhas chaves RSA não foram geradas ainda.")
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(KeyExchangeApiResponse::Failure {
+                        error: "Minhas chaves RSA não foram geradas ainda.".to_string()
+                    }))
                 }
             }
             Err(e) => {
                 eprintln!("Erro ao processar 'n' da chave pública recebida: {}", e);
-                HttpResponse::BadRequest().body("Formato de 'n' da chave pública inválido.")
+                (StatusCode::BAD_REQUEST, Json(KeyExchangeApiResponse::Failure {
+                    error: format!("Formato de 'n' da chave pública inválido: {}", e)
+                }))
             },
         },
         Err(e) => {
             eprintln!("Erro ao processar 'e' da chave pública recebida: {}", e);
-            HttpResponse::BadRequest().body("Formato de 'e' da chave pública inválido.")
+            (StatusCode::BAD_REQUEST, Json(KeyExchangeApiResponse::Failure {
+                error: format!("Formato de 'e' da chave pública inválido: {}", e)
+            }))
         },
     }
 }
 
-async fn handle_chat_message(
-    req_body: web::Json<EncryptedChatMessage>,
-    data: web::Data<Arc<Mutex<AppState>>>,
-) -> impl Responder {
+async fn handle_chat_message_axum(
+    State(app_state_arc): State<Arc<Mutex<AppState>>>,
+    Json(req_body): Json<EncryptedChatMessage>,
+) -> impl IntoResponse {
     let _stdout_lock = io::stdout().lock();
     println!(""); 
 
-    let app_state = data.lock().unwrap();
+    let app_state = app_state_arc.lock().unwrap();
 
     if let Some(my_keys) = &app_state.my_keys {
         match base64_decode(&req_body.ciphertext_b64) {
@@ -75,31 +95,38 @@ async fn handle_chat_message(
                 match my_keys.decrypt(&cipher_num) {
                     Ok(decrypted_num) => {
                         let decrypted_bytes = decrypted_num.to_bytes_be();
-                        match String::from_utf8(decrypted_bytes) {
-                            Ok(decrypted_message) => {
-                                println!("\r<-- [{}] {}", req_body.sender_id, decrypted_message);
-                                HttpResponse::Ok().body("Mensagem recebida.")
-                            }
-                            Err(e) => {
-                                eprintln!("\r[ERRO CHAT RECEBIDO] Falha ao converter para UTF-8: {}", e);
-                                HttpResponse::InternalServerError().body("Mensagem recebida corrompida (UTF-8).")
-                            }
+
+                        // LOG DE DEBUG DOS BYTES DESCRIPTOGRAFADOS
+                        let current_app_id_for_log = app_state.my_id.clone();
+                        eprintln!("[DEBUG RECEBENDO em {}] Bytes Descriptografados (de {}): {:?}", current_app_id_for_log, req_body.sender_id, decrypted_bytes);
+                        
+                        // USA from_utf8_lossy para diagnóstico
+                        let cow_str = String::from_utf8_lossy(&decrypted_bytes);
+                        let decrypted_message = cow_str.as_ref();
+                        println!("\r<-- [{}] {}", req_body.sender_id, decrypted_message);
+
+                        if cow_str.contains('�') {
+                             eprintln!("[AVISO CHAT RECEBIDO em {}] Mensagem de {} continha caracteres UTF-8 inválidos substituídos.", current_app_id_for_log, req_body.sender_id);
+                             // Mantém o erro original para o cliente saber da corrupção, se desejar.
+                             (StatusCode::INTERNAL_SERVER_ERROR, "Mensagem recebida corrompida (UTF-8).".to_string())
+                        } else {
+                             (StatusCode::OK, "Mensagem recebida.".to_string())
                         }
                     }
                     Err(e) => {
                         eprintln!("\r[ERRO CHAT RECEBIDO] Falha ao descriptografar: {}", e);
-                        HttpResponse::InternalServerError().body(format!("Falha ao descriptografar: {}", e))
+                        (StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao descriptografar: {}", e))
                     }
                 }
             }
             Err(e) => {
                 eprintln!("\r[ERRO CHAT RECEBIDO] Falha na decodificação Base64: {}", e);
-                HttpResponse::BadRequest().body(format!("Falha na decodificação Base64: {}", e))
+                (StatusCode::BAD_REQUEST, format!("Falha na decodificação Base64: {}", e))
             }
         }
     } else {
         eprintln!("\r[ERRO CHAT RECEBIDO] Chaves não disponíveis para descriptografar.");
-        HttpResponse::InternalServerError().body("Chaves não disponíveis.")
+        (StatusCode::INTERNAL_SERVER_ERROR, "Chaves não disponíveis.".to_string())
     }
 }
 
@@ -161,6 +188,8 @@ async fn start_chat_mode(
         }
 
         let message_bytes = message_text.as_bytes();
+        // LOG DE DEBUG DOS BYTES ORIGINAIS
+        eprintln!("[DEBUG ENVIANDO por {}] Bytes Originais ('{}'): {:?}", my_id_clone, message_text, message_bytes);
         let message_biguint = BigUint::from_bytes_be(message_bytes);
 
         match RSAKeys::encrypt_with_external_key(&message_biguint, &peer_public_key.0, &peer_public_key.1) {
@@ -209,14 +238,12 @@ async fn start_chat_mode(
 async fn main() -> io::Result<()> {
     clear().unwrap_or_else(|e| eprintln!("[Aviso] Erro ao limpar tela: {}",e));
 
-    // ***** ALTERAÇÕES PARA APP_DOIS *****
     let app_id = "App_Dois".to_string(); 
     let my_port: u16 = 8081;         
-    // ***** FIM DAS ALTERAÇÕES *****
 
     println!("[DEBUG] App ID: {}, Porta: {}", app_id, my_port);
 
-    let app_state = Arc::new(Mutex::new(AppState {
+    let app_state_arc = Arc::new(Mutex::new(AppState {
         my_keys: None,
         peer_public_key: None,
         peer_webhook_url: None,
@@ -225,39 +252,38 @@ async fn main() -> io::Result<()> {
     }));
     println!("[DEBUG] AppState inicializado.");
 
-    let server_state_ref = Arc::clone(&app_state);
-    let my_address = format!("127.0.0.1:{}", my_port);
-    
-    println!("[DEBUG] Servidor HTTP irá configurar rotas ao ser construído por cada worker.");
+    let axum_app_state = Arc::clone(&app_state_arc);
+    let app_axum = Router::new()
+        .route("/key-exchange", post(handle_key_exchange_axum))
+        .route("/chat", post(handle_chat_message_axum))
+        .with_state(axum_app_state);
 
+    let my_address_str = format!("127.0.0.1:{}", my_port);
+    let socket_addr: SocketAddr = my_address_str.parse().expect("Formato de endereço inválido");
+
+    println!("[DEBUG THREAD SERVIDOR] Iniciando Servidor Axum para {} em http://{}", app_id, socket_addr);
+    
     let server_handle = tokio::spawn(async move {
-        // Re-clonar app_id para a thread do servidor, pois ela é movida.
-        let app_id_server = app_id.clone(); 
-        println!("[DEBUG THREAD SERVIDOR] Iniciando HttpServer para {} em http://{}", app_id_server, my_address); 
-        HttpServer::new(move || {
-            App::new()
-                .app_data(web::Data::new(Arc::clone(&server_state_ref)))
-                .route("/key-exchange", web::post().to(handle_key_exchange))
-                .route("/chat", web::post().to(handle_chat_message))
-        })
-        .bind(&my_address)
-        .expect(&format!("[PANIC] Não foi possível ligar o servidor à porta {}", my_port))
-        .run()
+        axum::serve(
+            tokio::net::TcpListener::bind(socket_addr).await.unwrap(),
+            app_axum.into_make_service(),
+        )
         .await
-        .expect("[PANIC] Falha ao executar o servidor HTTP (run.await falhou)");
-        println!("[DEBUG THREAD SERVIDOR] Servidor HTTP para {} foi encerrado.", app_id_server);
+        .unwrap();
     });
-    println!("[DEBUG] Spawn do servidor HTTP solicitado e thread principal continua.");
+
+    println!("[DEBUG] Spawn do servidor Axum solicitado e thread principal continua.");
 
     let http_client = Client::new();
-
+    
+    // --- Loop Principal da UI (sem alterações significativas) ---
     loop {
         clear().unwrap_or_else(|e| eprintln!("[Aviso] Erro ao limpar tela: {}",e));
         
         let current_app_id;
         let current_my_port;
         { 
-            let state_locked = app_state.lock().unwrap();
+            let state_locked = app_state_arc.lock().unwrap();
             current_app_id = state_locked.my_id.clone();
             current_my_port = state_locked.my_webhook_port;
         }
@@ -287,7 +313,7 @@ async fn main() -> io::Result<()> {
                 match bits_str.trim().parse::<usize>() {
                     Ok(bits) => {
                         println!("Gerando chaves de {} bits...", bits);
-                        let mut state = app_state.lock().unwrap();
+                        let mut state = app_state_arc.lock().unwrap();
                         match RSAKeys::generate(bits) {
                             Ok(keys) => {
                                 println!("✅ Chaves RSA geradas com sucesso!");
@@ -301,7 +327,7 @@ async fn main() -> io::Result<()> {
             }
             "2. Trocar Chave Pública com Outro Peer" => {
                 let (my_keys_clone_opt, my_webhook_url_for_exchange, my_id_clone_for_exchange, default_peer_port_str) = {
-                    let state_guard = app_state.lock().unwrap(); 
+                    let state_guard = app_state_arc.lock().unwrap(); 
                     if state_guard.my_keys.is_none() {
                         println!("Gere suas chaves RSA primeiro (Opção 1).");
                         (None, String::new(), String::new(), "0".to_string())
@@ -310,7 +336,6 @@ async fn main() -> io::Result<()> {
                             Some(state_guard.my_keys.as_ref().unwrap().clone()),
                             format!("http://localhost:{}", state_guard.my_webhook_port),
                             state_guard.my_id.clone(),
-                            // ***** ALTERAÇÃO PARA APP_DOIS *****
                             (if state_guard.my_webhook_port == 8081 {"8080"} else {"8081"}).to_string()
                         )
                     }
@@ -336,31 +361,36 @@ async fn main() -> io::Result<()> {
                     sender_id: my_id_clone_for_exchange,
                 };
 
-                // println!("[DEBUG] Enviando chave para: {}/key-exchange", peer_url);
                 match http_client.post(&format!("{}/key-exchange", peer_url))
                             .json(&my_public_key_msg)
                             .send()
                             .await
                 {
                     Ok(response) => {
-                        // println!("[DEBUG] Resposta da troca de chaves status: {}", response.status());
                         if response.status().is_success() {
-                            match response.json::<PublicKeyExchangeMessage>().await {
-                                Ok(peer_response_key_msg) => {
-                                    match peer_response_key_msg.e.parse::<BigUint>() {
-                                        Ok(e_val) => match peer_response_key_msg.n.parse::<BigUint>() {
-                                            Ok(n_val) => {
-                                                let mut state_after_network = app_state.lock().unwrap();
-                                                state_after_network.peer_public_key = Some((e_val, n_val));
-                                                state_after_network.peer_webhook_url = Some(peer_response_key_msg.webhook_url.clone());
-                                                println!("✅ Chave pública do peer ({}) recebida e URL definida para: {}", peer_response_key_msg.sender_id, peer_response_key_msg.webhook_url);
+                            match response.json::<KeyExchangeApiResponse>().await {
+                                Ok(api_response) => {
+                                    match api_response {
+                                        KeyExchangeApiResponse::Success(peer_key_msg) => {
+                                            match peer_key_msg.e.parse::<BigUint>() {
+                                                Ok(e_val) => match peer_key_msg.n.parse::<BigUint>() {
+                                                    Ok(n_val) => {
+                                                        let mut state_after_network = app_state_arc.lock().unwrap();
+                                                        state_after_network.peer_public_key = Some((e_val, n_val));
+                                                        state_after_network.peer_webhook_url = Some(peer_key_msg.webhook_url.clone());
+                                                        println!("✅ Chave pública do peer ({}) recebida e URL definida para: {}", peer_key_msg.sender_id, peer_key_msg.webhook_url);
+                                                    }
+                                                    Err(e) => eprintln!("Erro ao decodificar 'n' da chave pública do peer (do JSON): {}", e),
+                                                },
+                                                Err(e) => eprintln!("Erro ao decodificar 'e' da chave pública do peer (do JSON): {}", e),
                                             }
-                                            Err(e) => eprintln!("Erro ao decodificar 'n' da chave pública do peer: {}", e),
-                                        },
-                                        Err(e) => eprintln!("Erro ao decodificar 'e' da chave pública do peer: {}", e),
+                                        }
+                                        KeyExchangeApiResponse::Failure { error } => {
+                                            eprintln!("Peer retornou um erro na troca de chaves: {}", error);
+                                        }
                                     }
                                 }
-                                Err(e) => eprintln!("Erro ao parsear resposta JSON do peer: {}", e),
+                                Err(e) => eprintln!("Erro ao parsear resposta JSON do peer (esperando KeyExchangeApiResponse): {}", e),
                             }
                         } else {
                             let status = response.status();
@@ -375,7 +405,7 @@ async fn main() -> io::Result<()> {
             }
             "3. Enviar Mensagem Criptografada (Única)" => {
                  let (peer_public_key_clone_opt, peer_url_clone_opt, my_id_clone, keys_present) = {
-                    let state_guard = app_state.lock().unwrap();
+                    let state_guard = app_state_arc.lock().unwrap();
                     if state_guard.peer_public_key.is_none() || state_guard.peer_webhook_url.is_none() {
                         println!("Troque chaves com outro peer primeiro (Opção 2).");
                         (None, None, "".to_string(), false)
@@ -406,28 +436,26 @@ async fn main() -> io::Result<()> {
                 }
                 
                 let message_bytes = message_text.as_bytes();
+                // LOG DE DEBUG DOS BYTES ORIGINAIS (também para mensagem única)
+                eprintln!("[DEBUG ENVIANDO por {}] Bytes Originais (Única) ('{}'): {:?}", my_id_clone, message_text, message_bytes);
                 let message_biguint = BigUint::from_bytes_be(message_bytes);
 
-                // println!("[DEBUG] Criptografando mensagem para {}: ...", my_id_clone);
                 match RSAKeys::encrypt_with_external_key(&message_biguint, &peer_public_key_clone.0, &peer_public_key_clone.1) {
                     Ok(encrypted_biguint) => {
                         let encrypted_bytes = encrypted_biguint.to_bytes_be();
                         let ciphertext_b64 = base64_encode(&encrypted_bytes);
-                        // println!("[DEBUG] Ciphertext B64: {}", ciphertext_b64);
 
                         let chat_message = EncryptedChatMessage {
                             ciphertext_b64,
                             sender_id: my_id_clone,
                         };
 
-                        // println!("[DEBUG] Enviando mensagem criptografada para {}/chat...", peer_url_clone);
                         match http_client.post(&format!("{}/chat", peer_url_clone))
                                     .json(&chat_message)
                                     .send()
                                     .await
                         {
                             Ok(response) => {
-                                // println!("[DEBUG] Resposta do envio de chat status: {}", response.status());
                                 if response.status().is_success() {
                                     println!("✅ Mensagem enviada com sucesso!");
                                 } else {
@@ -445,7 +473,7 @@ async fn main() -> io::Result<()> {
                 }
             }
             "4. Ver Estado Atual (Minhas Chaves/Info do Peer)" => {
-                let state = app_state.lock().unwrap();
+                let state = app_state_arc.lock().unwrap();
                 println!("\n--- Estado da {} ---", state.my_id);
                 if let Some(keys) = &state.my_keys {
                     println!("Minhas Chaves RSA Geradas:");
@@ -467,7 +495,7 @@ async fn main() -> io::Result<()> {
                 println!("---------------------------------");
             }
             "5. Entrar no Modo Chat" => {
-                let app_state_clone_for_chat = Arc::clone(&app_state);
+                let app_state_clone_for_chat = Arc::clone(&app_state_arc);
                 let http_client_for_chat = http_client.clone(); 
                 
                 if let Err(e) = start_chat_mode(app_state_clone_for_chat, &http_client_for_chat).await {
@@ -477,7 +505,6 @@ async fn main() -> io::Result<()> {
             "6. Sair" => {
                 println!("Saindo...");
                 if !server_handle.is_finished() {
-                    // println!("[DEBUG] A thread do servidor ainda pode estar rodando. Tentando abortar...");
                     server_handle.abort();
                 }
                 break;

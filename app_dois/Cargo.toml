@@ -7,20 +7,11 @@ edition = "2021"
 
 [dependencies]
 shared_crypto = { path = "../shared_crypto" }
-
-# Para Webhooks (Servidor HTTP e Cliente)
-actix-web = "4"
-tokio = { version = "1", features = ["full"] } 
-reqwest = { version = "0.12", features = ["json", "blocking"] }
-
-# Para serialização e desserialização de payloads
+num-bigint = "0.4"
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Para UI/interação no console
-inquire = "0.7" # Versão mais recente pode ter mudado, verifique crates.io
-clearscreen = "2.0.1"
-
-# num-bigint é necessário se você usar BigUint diretamente na lógica da app_dois,
-# além do que já é usado em shared_crypto.
-num-bigint = { version = "0.4", features = ["serde"] }
+inquire = "0.7"
+clearscreen = "2.0"
