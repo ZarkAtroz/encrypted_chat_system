@@ -17,9 +17,22 @@ Este projeto implementa um sistema de chat ponto a ponto (P2P) em Rust, onde doi
 
 O projeto é organizado como um workspace Cargo com os seguintes membros:
 
-* `app_um/`: Contém o código para a primeira aplicação de chat (`App_Um`).
-* `app_dois/`: Contém o código para a segunda aplicação de chat (`App_Dois`).
-* `shared_crypto/`: Uma biblioteca compartilhada que contém as implementações manuais das funcionalidades criptográficas:
+* **`app_um/`**: Contém o código para a primeira aplicação de chat (`App_Um`).
+    * Responsável por iniciar uma instância do chat, geralmente escutando na porta `8080`.
+    * Fornece uma Interface de Linha de Comando (CLI) para o Usuário 1 interagir com o sistema.
+    * Implementa um servidor HTTP (Axum) com dois endpoints principais:
+        * `/key-exchange`: Para receber a chave pública e a URL de webhook do `App_Dois`.
+        * `/chat`: Para receber mensagens criptografadas e assinadas do `App_Dois`.
+    * Utiliza `reqwest` para enviar sua chave pública e mensagens para o `App_Dois`.
+    * Gerencia o estado da aplicação, incluindo suas próprias chaves RSA, a chave pública do peer (`App_Dois`) e a URL do webhook do peer.
+
+* **`app_dois/`**: Contém o código para a segunda aplicação de chat (`App_Dois`).
+    * Funciona de forma análoga ao `App_Um`, mas geralmente escuta em uma porta diferente (padrão: `8081`) para permitir a comunicação local entre as duas instâncias.
+    * Fornece uma CLI para o Usuário 2.
+    * Implementa os mesmos endpoints (`/key-exchange`, `/chat`) para receber informações do `App_Um`.
+    * Utiliza `reqwest` para se comunicar com o `App_Um`.
+
+* **`shared_crypto/`**: Uma biblioteca compartilhada que contém as implementações manuais das funcionalidades criptográficas:
     * `rsa.rs`: Implementação de RSA (geração de chaves, exponenciação modular), padding OAEP para criptografia, e padding PKCS#1 v1.5 para assinaturas.
     * `sha256.rs`: Implementação do algoritmo de hash SHA-256.
     * `base64.rs`: Implementação de codificação e decodificação Base64.
@@ -129,3 +142,5 @@ Este projeto foi desenvolvido com foco no aprendizado e na implementação manua
 * Melhorar a interface do usuário (GUI em vez de CLI).
 * Implementar armazenamento persistente de chaves e contatos.
 * Adicionar suporte para conversas em grupo.
+
+---
