@@ -129,7 +129,3 @@ Este projeto foi desenvolvido com foco no aprendizado e na implementação manua
 * Melhorar a interface do usuário (GUI em vez de CLI).
 * Implementar armazenamento persistente de chaves e contatos.
 * Adicionar suporte para conversas em grupo.
-
----
-
-Este projeto serve como uma excelente ferramenta educacional para entender os fundamentos da criptografia de chave pública, padding e assinaturas digitais em um contexto prático.
